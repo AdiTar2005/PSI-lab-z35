@@ -1,0 +1,41 @@
+# --- C / C++ (pliki obiektowe i wykonywalne) ---
+*.o
+*.obj
+*.out
+*.exe
+*.so
+*.a
+build/
+bin/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Dokumentacja ---
+*.aux
+*.log
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# --- Edytory i IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Systemy operacyjne ---
+.DS_Store
+Thumbs.db
+
+# --- Archiwa i logi testowe ---
+*.zip
+*.tar.gz
