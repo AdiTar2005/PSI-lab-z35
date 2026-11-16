@@ -1,0 +1,5 @@
+FROM gcc:4.9
+COPY . /app
+WORKDIR /app
+RUN gcc -DUSE_RESOLVER -o client sock_client1.c
+ENTRYPOINT ["./client"]
