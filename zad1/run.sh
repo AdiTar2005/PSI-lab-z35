@@ -5,7 +5,7 @@ NETWORK="z35_network"
 SERVER_NAME="z35_server"
 CLIENT_NAME="z35_client"
 PORT="8888"
-TOTAL_MB="1"
+TOTAL_MB="4"
 
 cleanup() {
     echo ""
