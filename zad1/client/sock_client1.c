@@ -10,14 +10,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define TEMP_FAILURE_RETRY(exp) ({         \
-    typeof(exp) _rc;                       \
-    do {                                   \
-        _rc = (exp);                       \
-    } while (_rc == -1 && errno == EINTR); \
-    _rc;                                   \
-})
-
 static int connect_to_server(const char *host, const char *port) {
     struct addrinfo hints;
     struct addrinfo *res = NULL;
@@ -53,11 +45,17 @@ static int connect_to_server(const char *host, const char *port) {
 static int write_all(int sock, const char *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = TEMP_FAILURE_RETRY(write(sock, buf + sent, len - sent));
-        if (n <= 0) {
+        ssize_t n = write(sock, buf + sent, len - sent);
+        if (n == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
             return -1;
         }
-        sent += n;
+        if (n == 0) {
+            return -1;
+        }
+        sent += (size_t)n;
     }
 
     return 0;
@@ -112,7 +110,7 @@ static int send_data(int sock, const char *buf, size_t buf_size, size_t total_by
 
     shutdown(sock, SHUT_WR);
     char end_byte;
-    TEMP_FAILURE_RETRY(read(sock, &end_byte, 1));
+    while (read(sock, &end_byte, 1) == -1 && errno == EINTR) {}
     return 0;
 }
 
