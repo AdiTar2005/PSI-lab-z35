@@ -1,5 +1,5 @@
 FROM gcc:latest
 WORKDIR /app
 COPY sock_client1.c .
-RUN gcc -O2 -std=c11 -Wall -Wextra sock_client1.c -o client
+RUN gcc -O2 -std=gnu11 -Wall -Wextra sock_client1.c -o client
 ENTRYPOINT ["./client"]
