@@ -1,77 +1,120 @@
-/* (c) Grzegorz Blinowski 2000-2026 [TIN / PSI] */
-/* Ten prosty serwer uzywa funkji getaddrinfo() w obsludze resolvera */
-#include <arpa/inet.h>
+#define _POSIX_C_SOURCE 200809L
+
+#include <errno.h>
 #include <netdb.h>
-#include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
-#define TRUE 1
-#define BSIZE 1024
+#define DEF_PORT     "8888"
+#define DEF_DELAY_US 5000
+#define BSIZE        4096
 
-#define bailout(s) {perror(s); exit(1); }
-#define notDone() TRUE
+#define TEMP_FAILURE_RETRY(exp) ({         \
+    typeof(exp) _rc;                       \
+    do {                                   \
+        _rc = (exp);                       \
+    } while (_rc == -1 && errno == EINTR); \
+    _rc;                                   \
+})
 
-#define DEF_PORT "8888"
+static volatile sig_atomic_t running = 1;
 
-int moreWork(void) {
-    return 1;
+static void stop_server(int sig) {
+    (void)sig;
+    running = 0;
 }
 
-int  main(int argc, char **argv) {
-    int sock, msgsock, rval, ListenQueueSize=5;
-    socklen_t length;
-    struct addrinfo *bindto_address;
+static int init_server(const char *port) {
     struct addrinfo hints;
-    struct sockaddr_in server;
-    char buf[BSIZE];
-
-
-    /* initialize socket type, address and port */
+    struct addrinfo *res = NULL;
+    int optval = 1;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
-    if ( getaddrinfo(0, DEF_PORT, &hints, &bindto_address) != 0 ) 
-        bailout("getting local address");
+    int err = getaddrinfo(NULL, port, &hints, &res);
+    if (err != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(err));
+        return -1;
+    }
 
-    sock = socket(bindto_address->ai_family, bindto_address->ai_socktype, bindto_address->ai_protocol);
-    if (sock == -1) 
-        bailout("opening stream socket");
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock == -1) {
+        perror("opening stream socket");
+        freeaddrinfo(res);
+        return -1;
+    }
 
-    /* dowiaz adres do gniazda */
-    if (bind(sock, bindto_address->ai_addr, bindto_address->ai_addrlen )
-            == -1) 
-        bailout("binding stream socket");
-    freeaddrinfo(bindto_address);
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    if (bind(sock, res->ai_addr, res->ai_addrlen) == -1) {
+        perror("binding stream socket");
+        close(sock);
+        freeaddrinfo(res);
+        return -1;
+    }
 
-    /* zacznij przyjmowaæ polaczenia... */
-    listen(sock, ListenQueueSize);
+    freeaddrinfo(res);
+    if (listen(sock, 5) == -1) {
+        perror("listen");
+        close(sock);
+        return -1;
+    }
 
+    return sock;
+}
+
+static void handle_client(int msgsock, int delay_us) {
+    char buf[BSIZE];
+    ssize_t rval;
+    struct timespec req = { delay_us / 1000000, (delay_us % 1000000) * 1000L };
+    printf("Client connected\n");
+    fflush(stdout);
     do {
-        msgsock = accept(sock,(struct sockaddr *) 0, (socklen_t *) 0);
-        if (msgsock == -1 ) {
-            bailout("accept"); 
-	} else do {
-                memset(buf, 0, sizeof buf);
-                if ((rval = read(msgsock,buf, BSIZE)) == -1)
-                    bailout("reading stream message");
-                if (rval == 0)
-                    printf("%s: Ending connection\n", argv[0]);
-                else
-                    printf("%s: -->%s\n", argv[0], buf);
-            } while (rval != 0);
-        close(msgsock);
-        fflush( stdout );
-    } while( moreWork() );
-    /*
-     * gniazdo sock nie zostanie nigdy zamkniete jawnie,
-     * jednak wszystkie deskryptory zostana zamkniete gdy proces
-     * zostanie zakonczony (np w wyniku wystapienia sygnalu)
-     */
+        rval = TEMP_FAILURE_RETRY(read(msgsock, buf, BSIZE));
+        if (rval == -1) {
+            perror("reading stream message");
+            break;
+        }
+        if (rval == 0) {
+            printf("Ending connection\n");
+        } else if (delay_us > 0) {
+            nanosleep(&req, NULL);
+        }
+    } while (rval > 0);
+}
 
-    exit(0);
+int main(int argc, char *argv[]) {
+    const char *port = (argc >= 2) ? argv[1] : DEF_PORT;
+    int delay_us = (argc >= 3) ? atoi(argv[2]) : DEF_DELAY_US;
+    signal(SIGINT, stop_server);
+    signal(SIGTERM, stop_server);
+    int sock = init_server(port);
+    if (sock == -1) {
+        return 1;
+    }
+
+    printf("Server listening on port %s (delay=%d us)\n", port, delay_us);
+    fflush(stdout);
+    while (running) {
+        int msgsock = accept(sock, NULL, NULL);
+        if (msgsock == -1) {
+            if (errno == EINTR && !running) {
+                break;
+            }
+            perror("accept");
+            continue;
+        }
+
+        handle_client(msgsock, delay_us);
+        close(msgsock);
+        fflush(stdout);
+    }
+
+    close(sock);
+    return 0;
 }
