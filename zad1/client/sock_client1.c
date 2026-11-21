@@ -91,6 +91,7 @@ static int send_data(int sock, const char *buf, size_t buf_size, size_t total_by
         sent += chunk;
         if (calls <= 5) {
             printf("  [write #%zu] sent=%zu B | time=%.2f us\n", calls, sent, dt);
+            fflush(stdout);
         }
     }
 
@@ -137,6 +138,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Connected to %s:%s | buffer=%d B | target=%d MB\n", argv[1], argv[2], buf_size, total_mb);
+    fflush(stdout);
     int status = send_data(sock, buf, buf_size, total_bytes);
     free(buf);
     close(sock);
