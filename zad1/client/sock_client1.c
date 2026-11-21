@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <netinet/tcp.h>
 #include <errno.h>
 #include <netdb.h>
 #include <stdio.h>
@@ -43,6 +44,8 @@ static int connect_to_server(const char *host, const char *port) {
         return -1;
     }
 
+    int flag = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     freeaddrinfo(res);
     return sock;
 }
@@ -89,7 +92,7 @@ static int send_data(int sock, const char *buf, size_t buf_size, size_t total_by
         sum_us += dt;
         calls++;
         sent += chunk;
-        if (calls <= 5) {
+        if (calls <= 5 || sent % 262144 == 0) {
             printf("  [write #%zu] sent=%zu B | time=%.2f us\n", calls, sent, dt);
             fflush(stdout);
         }
