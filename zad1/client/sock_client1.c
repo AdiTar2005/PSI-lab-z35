@@ -110,6 +110,9 @@ static int send_data(int sock, const char *buf, size_t buf_size, size_t total_by
     printf("write() MAX:   %.2f us\n", max_us);
     printf("--------------------------------\n\n");
 
+    shutdown(sock, SHUT_WR);
+    char end_byte;
+    TEMP_FAILURE_RETRY(read(sock, &end_byte, 1));
     return 0;
 }
 
