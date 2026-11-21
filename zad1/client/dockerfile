@@ -1,5 +1,5 @@
-FROM gcc:4.9
-COPY . /app
+FROM gcc:latest
 WORKDIR /app
-RUN gcc -DUSE_RESOLVER -o client sock_client1.c
+COPY sock_client1.c .
+RUN gcc -O2 -std=c11 -Wall -Wextra sock_client1.c -o client
 ENTRYPOINT ["./client"]

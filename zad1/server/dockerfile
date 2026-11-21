@@ -1,5 +1,5 @@
-FROM gcc:4.9
-COPY . /app
+FROM gcc:latest
 WORKDIR /app
-RUN gcc -o server sock_server_gi1.c
-CMD ["./server"]
+COPY sock_server_gi1.c .
+RUN gcc -O2 -std=c11 -Wall -Wextra sock_server_gi1.c -o server
+CMD ["./server", "8888", "5000"]
