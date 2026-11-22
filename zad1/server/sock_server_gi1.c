@@ -95,8 +95,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Server listening on port %s (delay=%d us)\n", port, delay_us);
-    fflush(stdout);
     while (running) {
         int msgsock = accept(sock, NULL, NULL);
         if (msgsock == -1) {

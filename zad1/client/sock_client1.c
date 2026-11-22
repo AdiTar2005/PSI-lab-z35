@@ -119,7 +119,7 @@ int main(int argc, char *argv[]) {
     int buf_size = atoi(argv[3]);
     int total_mb = atoi(argv[4]);
     if (buf_size <= 0 || total_mb <= 0) {
-        fprintf(stderr, "Error: buffer size and total MB must be > 0\n");
+        fprintf(stderr, "Invalid buffer size or total MB\n");
         return 1;
     }
 
@@ -137,7 +137,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Connected to %s:%s | buffer=%d B | target=%d MB\n", argv[1], argv[2], buf_size, total_mb);
+    printf("Connected to %s:%s (buf: %d B, total: %d MB)\n", argv[1], argv[2], buf_size, total_mb);
     fflush(stdout);
     int status = send_data(sock, buf, buf_size, total_bytes);
     free(buf);
