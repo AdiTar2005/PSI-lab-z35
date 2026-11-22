@@ -14,14 +14,6 @@
 #define DEF_DELAY_US 5000
 #define BSIZE        4096
 
-#define TEMP_FAILURE_RETRY(exp) ({         \
-    typeof(exp) _rc;                       \
-    do {                                   \
-        _rc = (exp);                       \
-    } while (_rc == -1 && errno == EINTR); \
-    _rc;                                   \
-})
-
 static volatile sig_atomic_t running = 1;
 
 static void stop_server(int sig) {
@@ -70,22 +62,27 @@ static int init_server(const char *port) {
 
 static void handle_client(int msgsock, int delay_us) {
     char buf[BSIZE];
-    ssize_t rval;
     struct timespec req = { delay_us / 1000000, (delay_us % 1000000) * 1000L };
     printf("Client connected\n");
     fflush(stdout);
-    do {
-        rval = TEMP_FAILURE_RETRY(read(msgsock, buf, BSIZE));
+
+    while (1) {
+        ssize_t rval = read(msgsock, buf, BSIZE);
         if (rval == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
             perror("reading stream message");
             break;
         }
         if (rval == 0) {
             printf("Ending connection\n");
-        } else if (delay_us > 0) {
+            break;
+        }
+        if (delay_us > 0) {
             nanosleep(&req, NULL);
         }
-    } while (rval > 0);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -103,8 +100,8 @@ int main(int argc, char *argv[]) {
     while (running) {
         int msgsock = accept(sock, NULL, NULL);
         if (msgsock == -1) {
-            if (errno == EINTR && !running) {
-                break;
+            if (errno == EINTR) {
+                continue;
             }
             perror("accept");
             continue;
