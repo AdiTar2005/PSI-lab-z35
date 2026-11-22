@@ -90,10 +90,6 @@ static int send_data(int sock, const char *buf, size_t buf_size, size_t total_by
         sum_us += dt;
         calls++;
         sent += chunk;
-        if (calls <= 5 || sent % 262144 == 0) {
-            printf("  [write #%zu] sent=%zu B | time=%.2f us\n", calls, sent, dt);
-            fflush(stdout);
-        }
     }
 
     double mb = sent / (1024.0 * 1024.0);
