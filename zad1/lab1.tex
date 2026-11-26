@@ -1,0 +1,178 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[polish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{listings}
+
+\geometry{margin=2.5cm}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    frame=single,
+    breaklines=true,
+    columns=fullflexible,
+    keepspaces=true,
+    showstringspaces=false
+}
+
+\begin{document}
+
+\section*{Programowanie sieciowe zad 1B}
+
+\textbf{Autorzy:} \\
+Adrian Tarach (Lider) \\
+Wojciech Kryński\\
+Grzegorz Niespodziany \\
+Data: 22.11.2026, Wersja: 1.0
+
+\section*{Treść zadania}
+
+Klient powinien wysyłać do serwera strumień danych w pętli (tzn. danych powinno być „dużo”, minimum rzędu kilku
+MB). Serwer powinien odbierać dane, ale między odczytami realizować sztuczne opóźnienie (np. za pomocą funkcji
+sleep()). W ten sposób symulujemy zjawisko odbiorcy, który „nie nadąża” za szybkim nadawcą. Stos TCP będzie
+spowalniał nadawcę, aby uniknąć tracenia danych. Należy zidentyfikować objawy tego zjawiska po stronie klienta
+(dodając pomiar i logowanie czasu) i krótko przedstawić swoje wnioski poparte uzyskanymi statystykami czasowymi.
+Wskazane jest też przeprowadzenie eksperymentu z różnymi rozmiarami bufora nadawczego po stronie klienta (np. 100
+B, 1 KB, 10 KB).
+
+
+\section*{Opis rozwiązania}
+
+\subsection*{Opis implementacji klienta (\texttt{sock\_client1.c})}
+
+\textbf{1. Funkcja \texttt{write\_all()}} \\
+Żeby mieć pewność, że cała porcja danych faktycznie zostanie wysłana, napisaliśmy funkcję pomocniczą \texttt{write\_all()}. Wywołuje ona \texttt{write()} w pętli \texttt{while (sent < len)}. Jeśli \texttt{write()} wyśle tylko część danych, dodajemy zwrócone \texttt{n} do licznika \texttt{sent}, przesuwamy wskaźnik w buforze (\texttt{buf + sent}) i w następnej iteracji wysyłamy resztę (\texttt{len - sent}). Gdy \texttt{write()} zostanie przerwane sygnałem (\texttt{n == -1} i \texttt{errno == EINTR}), ponawiamy próbę. Przy innym błędzie albo zerwanym połączeniu funkcja zwraca \texttt{-1}.
+
+\begin{lstlisting}
+static int write_all(int sock, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = write(sock, buf + sent, len - sent);
+        if (n == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (n == 0) {
+            return -1;
+        }
+        sent += (size_t)n;
+    }
+    return 0;
+}
+\end{lstlisting}
+
+\textbf{2. Pomiar czasu zapisu} \\
+Czas mierzymy bezpośrednio przed i po każdym wywołaniu \texttt{write\_all()} w głównej pętli \texttt{send\_data()}. Korzystamy z zegara \texttt{CLOCK\_MONOTONIC}, żeby zmiany czasu systemowego nie wpływały na wyniki. Różnicę dwóch znaczników (\texttt{t1}, \texttt{t2}) przeliczamy na mikrosekundy (\texttt{dt}).
+
+Pojedynczych pomiarów nie zapisujemy w pamięci. W każdej iteracji aktualizujemy tylko minimum (\texttt{min\_us}), maksimum (\texttt{max\_us}) i sumę (\texttt{sum\_us}), a na końcu liczymy z nich średnią i przepustowość. Do porównania różnych rozmiarów bufora to wystarczy.
+
+\begin{lstlisting}
+struct timespec t1, t2;
+clock_gettime(CLOCK_MONOTONIC, &t1);
+if (write_all(sock, buf, chunk) == -1) {
+    perror("writing on stream socket");
+    return -1;
+}
+clock_gettime(CLOCK_MONOTONIC, &t2);
+double dt = (t2.tv_sec - t1.tv_sec) * 1e6 + (t2.tv_nsec - t1.tv_nsec) * 1e-3;
+\end{lstlisting}
+
+\textbf{3. Podział danych na porcje} \\
+Klient alokuje bufor o rozmiarze \texttt{buf\_size} wypełniony znakami \texttt{'A'} i w pętli \texttt{while (sent < total\_bytes)} wysyła kolejne porcje. Rozmiar porcji to mniejsza z wartości: \texttt{buf\_size} albo liczba bajtów, które jeszcze zostały (\texttt{total\_bytes - sent}). Dzięki temu zawsze wysyłamy dokładnie 4 MiB ($4\,194\,304$ B), nawet gdy rozmiar bufora nie dzieli tej wartości bez reszty (np. przy 100 B).
+
+\textbf{4. Czekanie na odbiór wszystkich danych (\texttt{shutdown})} \\
+Po wysłaniu wszystkich danych klient nie wywołuje od razu \texttt{close()}. Najpierw zamyka kierunek wysyłania przez \texttt{shutdown(sock, SHUT\_WR)}, a potem czeka w \texttt{read()}, aż serwer odbierze wszystko i sam zamknie połączenie:
+
+\begin{lstlisting}
+shutdown(sock, SHUT_WR);
+char end_byte;
+while (read(sock, &end_byte, 1) == -1 && errno == EINTR) {
+}
+\end{lstlisting}
+Dzięki temu kontener klienta nie kończy się za wcześnie i serwer ma czas doczytać końcówkę danych z bufora.
+
+\subsection*{Opis implementacji serwera (\texttt{sock\_server\_gi1.c})}
+
+Po \texttt{accept()} serwer wchodzi do funkcji \texttt{handle\_client()}, gdzie w pętli \texttt{while (1)} czyta dane wywołaniami \texttt{read()} po maksymalnie 4096 B (\texttt{BSIZE}). Przerwanie sygnałem (\texttt{EINTR}) powoduje ponowienie odczytu, a \texttt{read()} zwracające \texttt{0} oznacza, że klient zamknął swoją stronę (\texttt{shutdown}), więc wychodzimy z pętli. Po każdym udanym odczycie serwer śpi 5 ms (\texttt{nanosleep()}), co symuluje wolne przetwarzanie danych.
+
+\begin{lstlisting}
+while (1) {
+    ssize_t rval = read(msgsock, buf, BSIZE);
+    if (rval == -1) {
+        if (errno == EINTR) {
+            continue;
+        }
+        perror("reading stream message");
+        break;
+    }
+    if (rval == 0) {
+        printf("Ending connection\n");
+        break;
+    }
+    if (delay_us > 0) {
+        nanosleep(&req, NULL);
+    }
+}
+\end{lstlisting}
+
+\section*{Napotkane problemy i sposoby ich rozwiązania}
+
+\textbf{Zawieszanie się drugiego testu (bufor 1024 B)}
+
+Przy uruchamianiu trzech testów po kolei pierwszy (bufor 100 B) przechodził bez problemu, ale drugi (1024 B) blokował się po kilku pierwszych wywołaniach \texttt{write()} i nigdy się nie kończył.
+
+Okazało się, że klient po wpisaniu wszystkich danych do bufora jądra od razu kończył działanie, a Docker usuwał jego kontener, zanim wolny serwer zdążył odebrać resztę danych i koniec połączenia. Serwer zostawał więc zablokowany na \texttt{read()} z pierwszego połączenia i nie wracał do \texttt{accept()}. Kolejny klient łączył się (połączenie czekało w kolejce \texttt{listen}), zapełniał bufory i stawał na \texttt{write()}.
+
+Rozwiązaliśmy to, dodając w kliencie \texttt{shutdown(sock, SHUT\_WR)} po wysłaniu danych i czekanie w \texttt{read()}, aż serwer zamknie gniazdo. Od tej pory kontener klienta żyje, dopóki serwer nie doczyta wszystkiego, i wszystkie trzy testy przechodzą.
+
+
+\section*{Opis konfiguracji testowej}
+
+\begin{itemize}
+    \item Kontenery komunikują się w wydzielonej sieci mostkowanej Dockera \texttt{z35\_network} przez swoje wirtualne interfejsy sieciowe.
+    \item Serwer (\texttt{z35\_server}) dostaje dynamiczny adres IP z podsieci, wiąże gniazdo na \texttt{0.0.0.0} i nasłuchuje na porcie \texttt{8888/TCP}.
+    \item Klient (\texttt{z35\_client}) dostaje kolejny adres z tej samej podsieci i łączy się po nazwie \texttt{z35\_server} na port \texttt{8888/TCP} z losowego portu lokalnego.
+    \item Przesyłamy 4 MiB danych, kolejno dla buforów klienta 100 B, 1024 B i 10240 B. Opóźnienie na serwerze jest stałe: 5 ms po każdym wywołaniu \texttt{read()}, które zwraca do 4096 B.
+\end{itemize}
+
+\section*{Opis testowania i wyniki pomiarów}
+
+Testy uruchamiamy skryptem \texttt{run.sh}, który buduje obrazy, uruchamia serwer w tle w sieci \texttt{z35\_network} i po kolei wywołuje klienta dla buforów 100 B, 1024 B i 10240 B. Poprawność działania sprawdziliśmy na podstawie wyników czasowych klienta i logów serwera, w których widać otwarcie i zamknięcie wszystkich trzech połączeń.
+
+W tabeli ,,Czas całk.'' to suma czasów wszystkich wywołań \texttt{write\_all()} (bez czekania na zamknięcie połączenia), a przepustowość to 4 MiB podzielone przez ten czas. Każdy wariant uruchomiliśmy raz.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{|c|c|c|c|c|c|c|}
+\hline
+\textbf{Bufor klienta} & \textbf{Wywołania} & \textbf{Czas całk.} & \textbf{Przepustowość} & \textbf{MIN} & \textbf{AVG} & \textbf{MAX} \\
+\hline
+100 B & 41\,944 & 3,958 s & 1,011 MiB/s & 1,06 $\mu$s & 94,36 $\mu$s & 626\,144,66 $\mu$s \\
+\hline
+1024 B & 4\,096 & 4,027 s & 0,993 MiB/s & 1,38 $\mu$s & 983,24 $\mu$s & 435\,991,56 $\mu$s \\
+\hline
+10240 B & 410 & 3,307 s & 1,209 MiB/s & 1,76 $\mu$s & 8\,066,24 $\mu$s & 726\,118,70 $\mu$s \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\section*{Wnioski}
+
+\begin{itemize}
+    \item Mimo stukrotnego zwiększenia bufora klienta (ze 100 B do 10240 B) czas wysyłania prawie się nie zmienił (3,31--4,03 s), a przepustowość wynosiła ok. 1,0--1,2 MiB/s. O tempie decyduje wolny serwer, a nie klient. Gdy bufor odbiorczy serwera się zapełnia, serwer ogłasza w TCP coraz mniejsze okno odbiorcze (aż do zera) i nadawca musi czekać. To jest sterowanie przepływem w TCP i dzięki niemu żadne dane nie giną.
+    \item Zmierzona przepustowość jest wyższa niż to, co serwer jest w stanie odebrać (4096 B co 5 ms, czyli ok. 0,78 MiB/s, więc odczyt 4 MiB zajmuje mu co najmniej 5,1 s). Wynika to z tego, że mierzymy tylko czas \texttt{write()}. Gdy klient kończy pisać, ostatnie kilkaset KiB -- 1 MiB danych leży jeszcze w buforach jądra (nadawczym po stronie klienta i odbiorczym po stronie serwera), a serwer doczytuje je dopiero później.
+    \item Czasy \texttt{write()} są bardzo nierówne. Najkrótsze zapisy trwały 1,06--1,76 $\mu$s, bo w buforze nadawczym było miejsce i dane były tylko kopiowane do jądra. Najdłuższe trwały 436--726 ms. Wtedy bufor był pełny i \texttt{write()} czekało, aż zwolni się w nim sporo miejsca (jądro nie budzi procesu po każdych kilku KB, tylko gdy zwolni się większa część bufora). To jest objaw ,,nienadążającego'' odbiorcy widoczny po stronie klienta.
+    \item Większy bufor zmniejszył liczbę wywołań \texttt{write()} ze $41\,944$ do $410$. Średni czas jednego wywołania wzrósł z 94,36 $\mu$s do 8\,066,24 $\mu$s, ale to wynika głównie z tego, że prawie ten sam całkowity czas dzielimy przez ok. 100 razy mniej wywołań. Różnica w przepustowości (1,01 vs 1,21 MiB/s) jest niewielka, a każdy test był uruchomiony tylko raz, więc nie traktujemy jej jako istotnej.
+\end{itemize}
+
+\end{document}
