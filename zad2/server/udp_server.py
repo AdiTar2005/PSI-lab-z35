@@ -1,47 +1,30 @@
+import socket
 import sys
 import time
-from socket import *
 
 BUFSIZE = 512
-TIMEOUT = 5.0
-
-
-def moreWork():
-    return True
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("no port, using 8888")
-        port = 8888
-    else:
-        port = int(sys.argv[1])
-
-    host = "0.0.0.0"
-    print("Will listen on", host, ":", port, flush=True)
-    s = socket(AF_INET, SOCK_DGRAM)
-    s.bind((host, port))
-    s.settimeout(TIMEOUT)
-    expected_seq = 0
-    received_count = 0
-    duplicates_count = 0
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8888
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("0.0.0.0", port))
+    print(f"UDP server listening on port {port}", flush=True)
+    expected = 0
+    received = 0
+    duplicates = 0
     delay_sum = 0.0
-    while moreWork():
+    while True:
         try:
             data, addr = s.recvfrom(BUFSIZE)
-        except timeout:
-            continue
         except KeyboardInterrupt:
-            print("recvfrom() interrupted, ending.")
             break
 
         if len(data) != BUFSIZE:
-            print("Invalid datagram size:", len(data))
             continue
 
         parts = data.decode("ascii", errors="ignore").split()
         if len(parts) < 3:
-            print("Invalid datagram format")
             continue
 
         try:
@@ -49,36 +32,31 @@ def main():
             send_ts = float(parts[1])
             msg_type = parts[2]
         except ValueError:
-            print("Malformed header")
             continue
 
         if seq not in (0, 1) or msg_type not in ("DATA", "FIN"):
             continue
 
-        ack_msg = f"ACK {seq}".encode("ascii")
-        if seq == expected_seq:
-            expected_seq = 1 - expected_seq
+        ack = f"ACK {seq}".encode()
+        if seq == expected:
+            expected = 1 - expected
             if msg_type == "DATA":
-                recv_ts = time.time() * 1000.0
-                delay_sum += (recv_ts - send_ts)
-                received_count += 1
-            elif msg_type == "FIN":
+                delay_sum += time.time() * 1000.0 - send_ts
+                received += 1
+            else:
                 for _ in range(5):
-                    s.sendto(ack_msg, addr)
-                avg_delay = (delay_sum / received_count) if received_count > 0 else 0.0
-                print(
-                    f"Session done from {addr}: received={received_count}, "
-                    f"duplicates={duplicates_count}, avg_delay={avg_delay:.2f} ms",
-                    flush=True,
-                )
-                expected_seq = 0
-                received_count = 0
-                duplicates_count = 0
+                    s.sendto(ack, addr)
+                avg_delay = delay_sum / received if received else 0.0
+                print(f"Session from {addr[0]}:{addr[1]} - received: {received}, duplicates: {duplicates}, avg_delay: {avg_delay:.2f} ms", flush=True)
+                expected = 0
+                received = 0
+                duplicates = 0
                 delay_sum = 0.0
                 continue
         else:
-            duplicates_count += 1
-        s.sendto(ack_msg, addr)
+            duplicates += 1
+
+        s.sendto(ack, addr)
     s.close()
 
 
