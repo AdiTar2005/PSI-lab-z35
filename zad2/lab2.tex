@@ -1,0 +1,185 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[polish]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{listings} % do wklejania kodu lub logów z terminala
+
+\geometry{margin=2.5cm}
+
+% Prosty wygląd kodu i logów (ramka + czcionka maszynowa)
+\lstset{
+    basicstyle=\ttfamily\small,
+    frame=single,
+    breaklines=true
+}
+
+\begin{document}
+
+% ==========================================
+% NAGŁÓWEK
+% ==========================================
+\section*{Programowanie sieciowe zad 2B}
+
+\textbf{Autorzy:} \\
+Adrian Tarach (Lider) \\
+Wojciech Kryński\\
+Grzegorz Niespodziany \\
+Data: 27.11.2026, Wersja: 1.0
+
+% ==========================================
+% ZWYKŁE SEKCJE I PODSEKCJE
+% ==========================================
+\section*{Treść zadania}
+
+Klient wysyła, a serwer odbiera datagramy. Datagramy powinny zawierać znacznik czasowy i numer sekwencyjny
+zapisany tekstowo lub binarnie. Odbiorca powinien weryfikować odebrany datagram i odsyłać odpowiedź o ustalonym
+formacie. Datagramy mają stałą wielkość, rzędu np. 512B. Należy zaimplementować prosty protokół niezawodnej
+transmisji, uwzględniający możliwość gubienia datagramów. Gubione pakiety były wykrywane i retransmitowane.
+Wskazówka – „Bit alternate protocol”. Należy uruchomić program w środowisku z modułem symulującym błędy
+gubienia pakietów (informacja o tym, jak to zrobić znajduje się w skrypcie opisującym środowisko Dockera). Należy
+zaprezentować wyniki testów dla różnych wartości gubienia pakietów.
+
+\section*{Opis rozwiązania}
+
+\subsection*{Opis implementacji klienta}
+
+\noindent \textbf{1. Realizacja protokołu naprzemiennego bitu (\texttt{send\_reliable})} \\
+Niezawodność transmisji nad protokołem UDP zrealizowaliśmy w funkcji \texttt{send\_reliable()}:
+\begin{itemize}
+    \item \textbf{Budowa datagramu:} Każdy pakiet ma stały rozmiar $512\text{ B}$ i zawiera identyfikator sesji, numer sekwencyjny (\texttt{0} lub \texttt{1}), znacznik czasu wysłania w milisekundach oraz typ wiadomości (\texttt{DATA} lub \texttt{FIN}), a pozostała część bufora jest wypełniona znakami \texttt{'*'}.
+    \item \textbf{Obsługa timeoutu i retransmisji:} Wykorzystaliśmy opcję gniazda \texttt{SO\_RCVTIMEO} ustawioną na $50\text{ ms}$. Gdy potwierdzenie nie nadejdzie w tym czasie, wywołanie \texttt{recv()} przerywa oczekiwanie i zwraca \texttt{-1} (ustawiając kod błędu przekroczenia czasu). Jest to sygnał do zwiększenia licznika retransmisji oraz ponownego wysłania tego samego datagramu z nowym znacznikiem czasu. Dla pakietu kończącego \texttt{FIN} ustawiliśmy dodatkowo limit prób (\texttt{max\_retries = 20}), aby klient nie zawiesił się w pętli w razie całkowitej utraty końcowego potwierdzenia.
+    \item \textbf{Weryfikacja odpowiedzi:} Po odebraniu datagramu zwrotnego klient porównuje jego treść z oczekiwanym ciągiem \texttt{"ACK <sid> <seq>"}. Dopiero po odebraniu zgodnego potwierdzenia przełącza numer sekwencyjny na przeciwny (\texttt{seq = 1 - seq}).
+\end{itemize}
+
+\begin{lstlisting}
+while (1) {
+    memset(buf, '*', DGRAMSIZE);
+    gettimeofday(&tv, NULL);
+    double ts = tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+    int len = snprintf(buf, DGRAMSIZE, "%d %d %.3f %s ", sid, seq, ts, type);
+    if (len > 0 && len < DGRAMSIZE) {
+        buf[len] = '*';
+    }
+
+    if (send(sock, buf, DGRAMSIZE, 0) < 0) {
+        perror("send");
+        return -1;
+    }
+
+    ssize_t n = recv(sock, ack, sizeof(ack) - 1, 0);
+    if (n > 0) {
+        ack[n] = '\0';
+        if (strcmp(ack, want) == 0) {
+            return 0;
+        }
+    } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+        (*retrans)++;
+        tries++;
+        if (max_retries > 0 && tries >= max_retries) {
+            return 1;
+        }
+    } else {
+        perror("recv");
+        return -1;
+    }
+}
+\end{lstlisting}
+
+\noindent \textbf{2. Użycie \texttt{connect()} dla gniazda datagramowego} \\
+W kliencie wywołaliśmy \texttt{connect()}, aby zapamiętać adres docelowy serwera w strukturach jądra, co upraszcza pętlę retransmisji, ponieważ można używać \texttt{send()} i \texttt{recv()} bez każdorazowego przekazywania struktury adresowej.
+
+\subsection*{Opis implementacji serwera}
+
+Serwer śledzi identyfikator bieżącej sesji (\texttt{cur\_sid}) oraz utrzymuje pojedynczy bit stanu \texttt{expected}, określający numer sekwencyjny kolejnego oczekiwanego datagramu:
+\begin{itemize}
+    \item \textbf{Odbiór nowego pakietu (\texttt{seq == expected}):} Serwer akceptuje datagram, przełącza stan na przeciwny (\texttt{expected = 1 - expected}), aktualizuje statystyki opóźnienia oraz liczby odebranych pakietów (\texttt{received}), a następnie odsyła potwierdzenie \texttt{ACK}.
+    \item \textbf{Odbiór duplikatu (\texttt{seq != expected}):} Sytuacja ta zachodzi wtedy, gdy poprzedni datagram dotarł do serwera, ale odesłane przez niego potwierdzenie zaginęło w sieci, przez co klient zretransmitował pakiet. Serwer w takim przypadku zwiększa jedynie licznik \texttt{duplicates} oraz ponawia wysyłkę \texttt{ACK}.
+    \item \textbf{Synchronizacja zakończenia sesji (\texttt{FIN} i stan \texttt{TIME\_WAIT}):} Po odebraniu poprawnego pakietu \texttt{FIN} serwer odsyła potwierdzenie \texttt{ACK}, wypisuje podsumowanie sesji i zapamiętuje jej identyfikator (\texttt{last\_sid}) przez $1{,}5\text{ s}$. Jeśli w tym czasie nadejdą spóźnione retransmisje \texttt{FIN} z tej samej sesji, serwer ponownie odsyła \texttt{ACK}, zamiast traktować je jako początek nowego połączenia.
+\end{itemize}
+
+\begin{lstlisting}
+ack = f"ACK {sid} {seq}".encode()
+
+if sid == last_sid and (time.time() - last_finish_time) < 1.5:
+    if msg_type == "FIN":
+        s.sendto(ack, addr)
+    continue
+
+if seq == expected:
+    expected = 1 - expected
+    if msg_type == "DATA":
+        delay_sum += time.time() * 1000.0 - send_ts
+        received += 1
+    else:
+        s.sendto(ack, addr)
+        avg_delay = delay_sum / received if received else 0.0
+        print(f"Session {sid} from {addr[0]}:{addr[1]} - received: {received}, duplicates: {duplicates}, avg_delay: {avg_delay:.2f} ms", flush=True)
+        last_sid = sid
+        last_finish_time = time.time()
+        cur_sid = None
+        continue
+else:
+    duplicates += 1
+
+s.sendto(ack, addr)
+\end{lstlisting}
+
+\section*{Napotkane problemy i sposoby ich rozwiązania}
+
+\textbf{Utrata końcowego potwierdzenia zamykającego sesję (\texttt{FIN})} \\
+\noindent 1. Napotkany błąd: W pierwszej wersji programu, przy wysokim poziomie gubienia pakietów ($30\%$), zdarzało się, że ostatni pakiet \texttt{FIN} docierał do serwera, ale pojedyncze odsyłane potwierdzenie ginęło w sieci. Serwer kończył wtedy sesję i zerował swój licznik sekwencyjny na \texttt{0}, podczas gdy klient nadal retransmitował \texttt{FIN} z numerem \texttt{1}, co prowadziło do utknięcia klienta w nieskończonej pętli.
+
+\noindent 2. Rozwiązanie: Wprowadziliśmy identyfikator sesji (\texttt{sid}) w nagłówku oraz mechanizm zbliżony do stanu \texttt{TIME\_WAIT} z protokołu TCP. Po odebraniu \texttt{FIN} serwer przez $1{,}5\text{ s}$ pamięta identyfikator zakończonej sesji i na każdą spóźnioną retransmisję \texttt{FIN} z tym samym \texttt{sid} ponownie odsyła \texttt{ACK}. Dodatkowo po stronie klienta ustawiliśmy limit $20$ prób dla pakietu \texttt{FIN}, dzięki czemu program nigdy nie zawiesi się przy całkowitej utracie końcowego potwierdzenia.
+
+
+\section*{Opis konfiguracji testowej}
+
+\begin{itemize}
+    \item \textbf{Środowisko i sieć:} Testy uruchomiliśmy na serwerze laboratoryjnym \texttt{bigubu} z wykorzystaniem predefiniowanej sieci mostkowanej zespołu \texttt{z35\_network}.
+    \item \textbf{Adresy i porty:}
+    \begin{itemize}
+        \item \textbf{Serwer (\texttt{z35\_udp\_server\_py}):} Nasłuchuje na adresie \texttt{0.0.0.0} i porcie \texttt{8888/UDP}.
+        \item \textbf{Klient (\texttt{z35\_udp\_client\_c}):} Otrzymał z puli podsieci adres \texttt{172.21.35.3} i wysyłał datagramy na nazwę kontenera serwera na port \texttt{8888/UDP}.
+    \end{itemize}
+    \item \textbf{Parametry eksperymentu:} W każdym teście klient wysyłał $500$ datagramów o stałej wielkości $512\text{ B}$ z limitem czasu oczekiwania na potwierdzenie równym $50\text{ ms}$. Gubienie pakietów ustawialiśmy symetrycznie na interfejsach \texttt{eth0} obu kontenerów dla czterech progów: $0\%$, $5\%$, $15\%$ oraz $30\%$.
+\end{itemize}
+
+
+\section*{Opis testowania i wyniki pomiarów}
+
+Przebieg eksperymentu zautomatyzowaliśmy w skrypcie \texttt{run.sh}, który buduje obrazy serwera i klienta z osobnych podkatalogów, uruchamia serwer w tle, a następnie w pętli zmienia parametr strat pakietów i uruchamia klienta dla kolejnych wartości.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+\textbf{Straty pakietów} & \textbf{Odebrane} & \textbf{Retransmisje} & \textbf{Duplikaty} & \textbf{Czas całk.} & \textbf{Przepustowość} \\
+\hline
+0\% & 500 & 0 & 0 & 0,021 s & 11 647,95 KB/s \\
+\hline
+5\% & 500 & 56 & 20 & 2,887 s & 86,59 KB/s \\
+\hline
+15\% & 500 & 194 & 84 & 9,907 s & 25,24 KB/s \\
+\hline
+30\% & 500 & 465 & 225 & 23,724 s & 10,54 KB/s \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\section*{Wnioski}
+
+\begin{itemize}
+    \item \textbf{Pełna niezawodność z wykorzystaniem UDP:} Zastosowanie protokołu naprzemiennego bitu pozwoliło dostarczyć komplet $500$ datagramów w każdym wariancie testowym, nawet przy $30\%$ strat pakietów na interfejsach obu stron.
+    \item \textbf{Wpływ dwukierunkowych strat na liczbę retransmisji:} Gubienie pakietów działało zarówno w kierunku do serwera, jak i z powrotem, przez co blisko połowa wszystkich retransmisji wynikała ze straty samego potwierdzenia. Świadczy o tym liczba duplikatów po stronie serwera ($20$ duplikatów przy $56$ retransmisjach dla strat $5\%$, $84$ przy $194$ dla strat $15\%$ oraz $225$ przy $465$ dla strat $30\%$).
+    \item \textbf{Spadek wydajności protokołu naprzemiennego bitu przy stratach:} Bez gubienia pakietów transmisja trwała zaledwie $0{,}021\text{ s}$. Wprowadzenie strat spowodowało gwałtowny spadek przepustowości (do $10{,}54\text{ KB/s}$ przy $30\%$ strat z $11\ 647{,}95\text{ KB/s}$ przy $0\%$ strat). Jest to spowodowane tym, że nadawca wysyła tylko jeden datagram naraz i po każdym zagubieniu musi odczekać pełny limit czasu ($50\text{ ms}$), zanim ponowi wysyłkę.
+\end{itemize}
+
+\end{document}
