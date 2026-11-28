@@ -4,7 +4,7 @@ set -e
 NETWORK="z35_network"
 SERVER_IMAGE="z35_udp_server"
 CLIENT_IMAGE="z35_udp_client"
-SERVER_CONTAINER="z35_udp_server_c"
+SERVER_CONTAINER="z35_udp_server_py"
 CLIENT_CONTAINER="z35_udp_client_c"
 
 docker build --tag $SERVER_IMAGE ./server
